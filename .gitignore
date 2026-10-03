@@ -1,0 +1,4 @@
+node_modules/
+tapestry-downloads/
+*.tgz
+.env

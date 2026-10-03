@@ -1,0 +1,106 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import http from "node:http";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { buildServer } from "../src/server.js";
+import { TapestryClient, extractCsrf } from "../src/client.js";
+
+const OBS = [
+  { id: 3, title: "Painting", createdAt: "2026-09-30T10:00:00Z", notes: "<p>Mixed <b>blue</b> and yellow.</p>",
+    children: [{ id: 7, fullName: "Alex P" }], mediaCount: 1,
+    media: [{ id: 11, type: "image", url: "https://media.example/a.jpg" }], frameworks: [{ name: "Expressive Arts" }] },
+  { id: 2, title: "Story time", createdAt: "2026-09-15T10:00:00Z", notes: "Listened to a story",
+    children: [{ id: 7, fullName: "Alex P" }] },
+  { id: 1, title: "Settling in", createdAt: "2026-09-01T10:00:00Z", notes: "First day" },
+];
+
+async function connect(getClient) {
+  const [a, b] = InMemoryTransport.createLinkedPair();
+  await buildServer(getClient).connect(a);
+  const c = new Client({ name: "t", version: "1" });
+  await c.connect(b);
+  return c;
+}
+const call = async (c, name, args = {}) => {
+  const r = await c.callTool({ name, arguments: args });
+  assert.ok(!r.isError, r.content?.[0]?.text);
+  return JSON.parse(r.content[0].text);
+};
+
+const fake = {
+  children: async () => [{ id: 7, fullName: "Alex P", group: { name: "Rainbows" } }],
+  async *iterObservations(_c, max = Infinity) { yield* OBS.slice(0, max); },
+  observation: async (id) => OBS.find((o) => String(o.id) === String(id)),
+};
+
+test("tools, filtering, detail and search", async () => {
+  const c = await connect(() => fake);
+  const names = (await c.listTools()).tools.map((t) => t.name).sort();
+  assert.deepEqual(names, ["download_media", "get_observation", "list_children", "list_observations", "search_observations"]);
+  assert.deepEqual(await call(c, "list_children"), [{ id: 7, name: "Alex P", group: "Rainbows", date_of_birth: null }]);
+  assert.deepEqual((await call(c, "list_observations", { since: "2026-09-10", until: "2026-09-20" })).map((o) => o.id), [2]);
+  const d = await call(c, "get_observation", { observation_id: "3" });
+  assert.match(d.notes, /blue/); assert.doesNotMatch(d.notes, /</);
+  assert.deepEqual(d.tags, ["Expressive Arts"]); assert.equal(d.media[0].id, 11);
+  assert.deepEqual((await call(c, "search_observations", { query: "expressive arts" })).map((o) => o.id), [3]);
+});
+
+test("missing credentials surface as a tool error, not a crash", async () => {
+  const c = await connect(() => new TapestryClient("", ""));
+  const r = await c.callTool({ name: "list_children", arguments: {} });
+  assert.ok(r.isError); assert.match(r.content[0].text, /TAPESTRY_EMAIL/);
+});
+
+test("csrf extraction", () => {
+  assert.equal(extractCsrf('<div class="hidden">{"csrfToken":"abc"}</div>'), "abc");
+  assert.equal(extractCsrf('<meta name="csrf-token" content="xyz">'), "xyz");
+});
+
+test("real client against a mock Tapestry: login, cookies, pagination, re-login", async () => {
+  let sessions = 0, expireNext = false;
+  const srv = http.createServer((req, res) => {
+    const u = new URL(req.url, "http://x"); const cookie = req.headers.cookie || "";
+    if (u.pathname === "/login" && req.method === "GET") {
+      res.setHeader("Set-Cookie", "XSRF=pre; Path=/");
+      return res.end('<form><input type="hidden" name="_token" value="t1"><input type="email" name="email"><input type="password" name="password"></form>');
+    }
+    if (u.pathname === "/login" && req.method === "POST") {
+      let body = ""; req.on("data", (d) => (body += d)); return req.on("end", () => {
+        const f = new URLSearchParams(body);
+        if (f.get("password") !== "pw" || f.get("_token") !== "t1" || !cookie.includes("XSRF=pre")) {
+          res.writeHead(302, { Location: "/login" }); return res.end();
+        }
+        sessions++;
+        res.writeHead(302, { Location: "/s/acorn-nursery/observations", "Set-Cookie": `sess=s${sessions}; Path=/` }); res.end();
+      });
+    }
+    if (u.pathname.startsWith("/s/")) return res.end('<div class="hidden">{"csrfToken":"api-tok"}</div>');
+    if (!cookie.includes(`sess=s${sessions}`) || req.headers["x-csrf-token"] !== "api-tok" || expireNext) {
+      expireNext = false; res.writeHead(401); return res.end();
+    }
+    res.setHeader("Content-Type", "application/json");
+    if (u.pathname === "/api/4/children/list") return res.end(JSON.stringify([{ id: 7, fullName: "Alex P" }]));
+    if (u.pathname === "/api/4/observations/list") {
+      const page = u.searchParams.get("cursor") ? [OBS[2]] : [OBS[0], OBS[1]];
+      return res.end(JSON.stringify({ observations: page, nextCursor: u.searchParams.get("cursor") ? null : "c2" }));
+    }
+    res.writeHead(404); res.end();
+  });
+  await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+  const base = `http://127.0.0.1:${srv.address().port}`;
+  try {
+    // Point the module's LOGIN_URL at the mock by constructing with baseUrl and patching login URL use.
+    const client = new TapestryClient("me@x", "pw", { baseUrl: base });
+    client._loginUrl = `${base}/login`;
+    const c = await connect(() => client);
+    assert.equal((await call(c, "list_children"))[0].name, "Alex P");
+    assert.equal(client.schoolSlug, "acorn-nursery");
+    assert.deepEqual((await call(c, "list_observations", { limit: 10 })).map((o) => o.id), [3, 2, 1]);
+    expireNext = true; // simulate session expiry → should transparently log in again
+    assert.equal((await call(c, "list_children")).length, 1);
+    assert.equal(sessions, 2);
+    const bad = new TapestryClient("me@x", "wrong", { baseUrl: base }); bad._loginUrl = `${base}/login`;
+    await assert.rejects(bad.children(), /login failed/i);
+  } finally { srv.close(); }
+});

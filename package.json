@@ -1,0 +1,33 @@
+{
+  "name": "tapestry-mcp",
+  "version": "0.2.0",
+  "description": "Unofficial read-only MCP server for the Tapestry learning journal (tapestryjournal.com)",
+  "type": "module",
+  "bin": {
+    "tapestry-mcp": "bin/tapestry-mcp.js"
+  },
+  "main": "src/server.js",
+  "files": [
+    "bin",
+    "src",
+    "README.md",
+    "server.json",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.0",
+    "cheerio": "^1.2.0",
+    "zod": "^4.6.5"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Mpercy-Git/tapestry-mcp.git"
+  }
+}
