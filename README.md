@@ -51,3 +51,7 @@ npm install && npm test
 ```
 
 Requires Node 20+. No build step — plain ES modules, so installing straight from GitHub works.
+
+## Releasing
+
+Bump `version` in `package.json` and in `server.json` (top-level and under `packages`), then merge to `main`. The **Release** workflow runs the tests, tags `v<version>` and publishes a GitHub release with the `npm pack` tarball attached. Pushes that don't change the version are a no-op; it can also be run by hand from the Actions tab.
