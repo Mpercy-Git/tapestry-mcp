@@ -1,0 +1,73 @@
+# Tags and releases v<version> whenever main carries a package.json version
+# that hasn't been released yet. To cut a release, bump "version" in
+# package.json and server.json (both places) and merge to main.
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Read version
+        id: version
+        run: |
+          version=$(node -p "require('./package.json').version")
+          node -e "
+            const s = require('./server.json');
+            const want = process.argv[1];
+            const bad = [s.version, ...s.packages.map(p => p.version)].filter(v => v !== want);
+            if (bad.length) {
+              console.error('server.json versions ' + JSON.stringify(bad) + ' do not match package.json ' + want);
+              process.exit(1);
+            }
+          " "$version"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "v$version is already tagged; nothing to release."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install
+        if: steps.version.outputs.exists == 'false'
+        run: npm ci
+
+      - name: Test
+        if: steps.version.outputs.exists == 'false'
+        run: npm test
+
+      - name: Pack
+        if: steps.version.outputs.exists == 'false'
+        run: npm pack
+
+      - name: Create release
+        if: steps.version.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          gh release create "$TAG" tapestry-mcp-*.tgz \
+            --target "$GITHUB_SHA" \
+            --title "$TAG" \
+            --generate-notes
