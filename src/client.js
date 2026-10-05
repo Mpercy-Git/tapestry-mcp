@@ -12,6 +12,9 @@ export const BASE_URL = "https://tapestryjournal.com";
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 
+// Set TAPESTRY_DEBUG=1 to log each login step to stderr (never the password).
+const debug = (msg) => { if (process.env.TAPESTRY_DEBUG) console.error(`[tapestry-mcp] ${msg}`); };
+
 export class TapestryError extends Error {}
 export class AuthError extends TapestryError {}
 
@@ -47,7 +50,10 @@ export function extractCsrf(html) {
 
 export class TapestryClient {
   constructor(email, password, { baseUrl = BASE_URL, timeoutMs = 30000 } = {}) {
-    if (!email || !password) throw new AuthError("TAPESTRY_EMAIL and TAPESTRY_PASSWORD must be set.");
+    if (!email || !password) {
+      const missing = [!email && "TAPESTRY_EMAIL", !password && "TAPESTRY_PASSWORD"].filter(Boolean).join(" and ");
+      throw new AuthError(`${missing} not set in the MCP server's environment.`);
+    }
     Object.assign(this, { email, password, baseUrl, timeoutMs });
     this._loginUrl = `${baseUrl.replace(/\/$/, "")}/login`;
     this.jar = new Jar();
@@ -61,9 +67,15 @@ export class TapestryClient {
     const headers = { "User-Agent": UA, ...(opts.headers || {}) };
     const cookie = this.jar.header();
     if (cookie) headers.Cookie = cookie;
-    const res = await fetch(url, {
-      ...opts, headers, redirect: "manual", signal: AbortSignal.timeout(opts.timeoutMs ?? this.timeoutMs),
-    });
+    let res;
+    try {
+      res = await fetch(url, {
+        ...opts, headers, redirect: "manual", signal: AbortSignal.timeout(opts.timeoutMs ?? this.timeoutMs),
+      });
+    } catch (e) {
+      const why = e.cause?.code || e.cause?.message || e.name || e.message;
+      throw new TapestryError(`Could not reach ${new URL(url).host} (${why}) — check the MCP host has internet access.`);
+    }
     this.jar.absorb(res);
     return res;
   }
@@ -89,14 +101,20 @@ export class TapestryClient {
   async _login() {
     this.jar.clear();
     const page = await this._get(this._loginUrl);
-    if (!page.ok) throw new TapestryError(`Login page returned HTTP ${page.status}`);
+    debug(`GET login page -> HTTP ${page.status} at ${page.finalUrl}`);
+    if (!page.ok) throw new TapestryError(`Tapestry login page returned HTTP ${page.status}.`);
     const html = await page.text();
     const csrf = extractCsrf(html);
-    if (!csrf) throw new AuthError("Could not find CSRF token on Tapestry login page.");
+    if (!csrf) throw new AuthError("Could not find the CSRF token on the Tapestry login page (the page layout may have changed).");
 
     const $ = cheerio.load(html);
+    // The page can carry other forms (search, cookie banner); use the one with the password box.
+    let $form = $("form").filter((_, el) => $(el).find('input[type="password"]').length > 0).first();
+    if (!$form.length) $form = $("form").first();
+    const action = $form.attr("action");
+    const postUrl = action ? new URL(action, page.finalUrl).href : this._loginUrl;
     const form = new URLSearchParams();
-    $("form").first().find("input").each((_, el) => {
+    $form.find("input").each((_, el) => {
       const name = $(el).attr("name"); const type = ($(el).attr("type") || "").toLowerCase();
       if (!name) return;
       if (name === "_token") form.set(name, csrf);
@@ -107,18 +125,31 @@ export class TapestryClient {
     for (const [k, v] of [["_token", csrf], ["email", this.email], ["password", this.password], ["remember", "1"]])
       if (!form.has(k)) form.set(k, v);
 
-    const post = await this._fetch(this._loginUrl, {
+    debug(`POST ${postUrl} with fields [${[...form.keys()].join(", ")}]`);
+    const post = await this._fetch(postUrl, {
       method: "POST", body: form,
-      headers: { "Content-Type": "application/x-www-form-urlencoded", Referer: this._loginUrl },
+      headers: { "Content-Type": "application/x-www-form-urlencoded", Referer: page.finalUrl, Origin: new URL(postUrl).origin },
     });
     const loc = post.headers.get("location");
-    const final = loc ? await this._get(new URL(loc, this._loginUrl).href) : post;
-    const finalUrl = final.finalUrl || this._loginUrl;
+    debug(`POST -> HTTP ${post.status}${loc ? ` redirect to ${loc}` : ""}`);
+    if (post.status === 419) throw new AuthError("Tapestry login failed: HTTP 419 (session/CSRF token rejected).");
+    if (post.status === 429) throw new AuthError("Tapestry login failed: HTTP 429 (too many attempts — wait a while before retrying).");
+    if (post.status >= 400) throw new AuthError(`Tapestry login failed: HTTP ${post.status} from ${postUrl}.`);
+    const final = loc ? await this._get(new URL(loc, postUrl).href) : post;
+    const finalUrl = final.finalUrl || postUrl;
     const body = await final.text();
+    debug(`ended at ${finalUrl} (HTTP ${final.status})`);
 
-    if (finalUrl.replace(/\/$/, "") === this._loginUrl ||
-        /\bincorrect\b|\bthese credentials\b|two.factor|verification code/i.test(body)) {
-      throw new AuthError("Tapestry login failed (bad credentials, or the account needs 2FA/SSO, which isn't supported).");
+    if (/two.factor|verification code|authenticator/i.test(body))
+      throw new AuthError("Tapestry login failed: the account asks for a 2FA code, which isn't supported.");
+    // Still looking at a password box (or back on /login) means the login didn't take.
+    const onLogin = new URL(finalUrl).pathname.replace(/\/$/, "") === new URL(this._loginUrl).pathname ||
+      cheerio.load(body)('input[type="password"]').length > 0;
+    if (onLogin) {
+      const why = /\bincorrect\b|\bthese credentials\b|\binvalid\b|do not match/i.test(body)
+        ? "Tapestry rejected the email or password"
+        : "still on the login page after submitting (wrong email/password, or SSO-only account)";
+      throw new AuthError(`Tapestry login failed: ${why}. Tried email: "${this.email}".`);
     }
     this.schoolSlug = finalUrl.match(/\/s\/([^/]+)\//)?.[1] || "";
     this.csrf = extractCsrf(body) || csrf;
