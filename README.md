@@ -21,7 +21,7 @@ Tapestry has no public API. This logs in with your own email and password and ca
 | Field | Value |
 |---|---|
 | Runtime | `npm` |
-| Package identifier | `github:Mpercy-Git/tapestry-mcp` (pin with `github:Mpercy-Git/tapestry-mcp#v0.2.0`) |
+| Package identifier | `github:Mpercy-Git/tapestry-mcp` (pin with `github:Mpercy-Git/tapestry-mcp#v0.2.1`) |
 | Transport | `stdio` |
 | Env | `TAPESTRY_EMAIL`, `TAPESTRY_PASSWORD` (bind the password to a vault credential if you prefer), optional `TAPESTRY_DOWNLOAD_DIR` |
 
@@ -38,6 +38,13 @@ Tapestry has no public API. This logs in with your own email and password and ca
   }
 }
 ```
+
+## Troubleshooting login
+
+- Use the variable names exactly: `TAPESTRY_EMAIL` (or `TAPESTRY_USERNAME`) and `TAPESTRY_PASSWORD`. The value is the **email address** you sign in to tapestryjournal.com with — check it works in a browser first.
+- Accounts that sign in with Google/Microsoft only, or that need a 2FA code, can't be used.
+- Add `TAPESTRY_DEBUG=1` to the env to log each login step (status codes, URLs, form field names — never the password) to the server's stderr.
+- The error message says which step failed: unreachable host, HTTP 419/429, a 2FA prompt, or back on the login page.
 
 ## Notes
 

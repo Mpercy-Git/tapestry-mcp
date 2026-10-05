@@ -191,7 +191,10 @@ export function buildServer(getClient) {
 
 export async function main() {
   let client;
-  const getClient = () => (client ??= new TapestryClient(process.env.TAPESTRY_EMAIL, process.env.TAPESTRY_PASSWORD));
+  // Accept TAPESTRY_USERNAME as an alias, and drop whitespace/newlines that sneak in when values are pasted.
+  const email = (process.env.TAPESTRY_EMAIL || process.env.TAPESTRY_USERNAME || "").trim();
+  const password = (process.env.TAPESTRY_PASSWORD || "").replace(/[\r\n]+$/, "");
+  const getClient = () => (client ??= new TapestryClient(email, password));
   await buildServer(getClient).connect(new StdioServerTransport());
   console.error("[tapestry-mcp] ready on stdio");
 }

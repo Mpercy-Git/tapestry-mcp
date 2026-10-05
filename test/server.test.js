@@ -104,3 +104,33 @@ test("real client against a mock Tapestry: login, cookies, pagination, re-login"
     await assert.rejects(bad.children(), /login failed/i);
   } finally { srv.close(); }
 });
+
+test("login uses the form with the password box and posts to its action; HTTP errors are reported", async () => {
+  let status = 302;
+  const srv = http.createServer((req, res) => {
+    const u = new URL(req.url, "http://x");
+    if (u.pathname === "/login" && req.method === "GET")
+      return res.end('<form action="/search"><input name="q"></form>' +
+        '<form action="/auth/login" method="post"><input type="hidden" name="_token" value="t1">' +
+        '<input type="email" name="email"><input type="password" name="password"></form>');
+    if (u.pathname === "/auth/login" && req.method === "POST") {
+      if (status !== 302) { res.writeHead(status); return res.end(); }
+      res.writeHead(302, { Location: "/s/oak/observations", "Set-Cookie": "sess=1; Path=/" }); return res.end();
+    }
+    if (u.pathname.startsWith("/s/")) return res.end('<div class="hidden">{"csrfToken":"api-tok"}</div>');
+    res.writeHead(404); res.end();
+  });
+  await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+  const base = `http://127.0.0.1:${srv.address().port}`;
+  try {
+    const client = new TapestryClient("me@x", "pw", { baseUrl: base });
+    await client.login();
+    assert.equal(client.schoolSlug, "oak");
+    status = 419;
+    await assert.rejects(new TapestryClient("me@x", "pw", { baseUrl: base }).login(), /HTTP 419/);
+  } finally { srv.close(); }
+});
+
+test("missing credentials name the unset variable", () => {
+  assert.throws(() => new TapestryClient("me@x", ""), /TAPESTRY_PASSWORD not set/);
+});
