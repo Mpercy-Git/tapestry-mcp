@@ -176,6 +176,9 @@ test("multi-school accounts: /select-school is resolved via links, forms, or TAP
       res.writeHead(302, { Location: "/select-school", "Set-Cookie": "sess=1; Path=/" }); return res.end();
     }
     if (u.pathname === "/select-school" && req.method === "GET") {
+      // Real Tapestry markup: a home link plus /visit-school/<id> per school.
+      if (page === "visit")
+        return res.end(`<a href="${base}">Tapestry</a><a href="${base}/visit-school/48405">Oak Nursery</a>`);
       if (page === "links")
         return res.end('<a href="/logout">Log out</a><a href="/s/oak/observations">Oak Nursery</a> <a href="/s/elm/observations">Elm Primary</a>');
       return res.end('<form method="post" action="/select-school"><input type="hidden" name="_token" value="t2">' +
@@ -187,6 +190,7 @@ test("multi-school accounts: /select-school is resolved via links, forms, or TAP
         res.writeHead(302, { Location: `/s/${slug}/observations`, "Set-Cookie": `school=${slug}; Path=/` }); res.end();
       });
     }
+    if (u.pathname === "/visit-school/48405") { res.writeHead(302, { Location: "/s/oak/observations" }); return res.end(); }
     const m = u.pathname.match(/^\/s\/(\w+)\//);
     if (m) {
       res.setHeader("Set-Cookie", `school=${m[1]}; Path=/`);
@@ -199,6 +203,12 @@ test("multi-school accounts: /select-school is resolved via links, forms, or TAP
   await new Promise((r) => srv.listen(0, "127.0.0.1", r));
   const base = `http://127.0.0.1:${srv.address().port}`;
   try {
+    page = "visit";
+    const visit = new TapestryClient("me@x", "pw", { baseUrl: base });
+    assert.equal((await visit.children())[0].fullName, "oak");
+    assert.equal(visit.schoolSlug, "oak");
+
+    page = "links";
     const first = new TapestryClient("me@x", "pw", { baseUrl: base });
     assert.equal((await first.children())[0].fullName, "oak");
     assert.equal(first.schoolSlug, "oak");

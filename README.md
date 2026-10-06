@@ -21,7 +21,7 @@ Tapestry has no public API. This logs in with your own email and password and ca
 | Field | Value |
 |---|---|
 | Runtime | `npm` |
-| Package identifier | `github:Mpercy-Git/tapestry-mcp` (pin with `github:Mpercy-Git/tapestry-mcp#v0.2.3`) |
+| Package identifier | `github:Mpercy-Git/tapestry-mcp` (pin with `github:Mpercy-Git/tapestry-mcp#v0.2.4`) |
 | Transport | `stdio` |
 | Env | `TAPESTRY_EMAIL`, `TAPESTRY_PASSWORD` (bind the password to a vault credential if you prefer), optional `TAPESTRY_SCHOOL`, `TAPESTRY_DOWNLOAD_DIR` |
 

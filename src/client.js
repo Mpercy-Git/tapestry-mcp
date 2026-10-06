@@ -58,7 +58,7 @@ export function extractCsrf(html) {
 
 /**
  * Schools offered on Tapestry's /select-school page (accounts linked to more than one school).
- * Handles plain links into /s/<slug>/, a <select> of schools, or one form/button per school.
+ * Handles links into /s/<slug>/ or /visit-school/<id> (what Tapestry serves), a <select> of schools, or one form/button per school.
  */
 export function schoolChoices(html, pageUrl) {
   const $ = cheerio.load(html);
@@ -69,7 +69,7 @@ export function schoolChoices(html, pageUrl) {
     let url;
     try { url = new URL($(el).attr("href"), pageUrl); } catch { return; }
     const slug = url.pathname.match(/^\/s\/([^/]+)/)?.[1];
-    const isChoice = slug || /select-school\/[^/]+/.test(url.pathname) || /[?&]school(_?id)?=/i.test(url.search);
+    const isChoice = slug || /(select|visit)-school\/[^/]+/.test(url.pathname) || /[?&]school(_?id)?=/i.test(url.search);
     const key = slug || url.href;
     if (!isChoice || seen.has(key) || url.host !== new URL(pageUrl).host) return;
     seen.add(key);
