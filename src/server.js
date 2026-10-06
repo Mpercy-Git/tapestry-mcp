@@ -194,7 +194,8 @@ export async function main() {
   // Accept TAPESTRY_USERNAME as an alias, and drop whitespace/newlines that sneak in when values are pasted.
   const email = (process.env.TAPESTRY_EMAIL || process.env.TAPESTRY_USERNAME || "").trim();
   const password = (process.env.TAPESTRY_PASSWORD || "").replace(/[\r\n]+$/, "");
-  const getClient = () => (client ??= new TapestryClient(email, password));
+  const school = (process.env.TAPESTRY_SCHOOL || "").trim();
+  const getClient = () => (client ??= new TapestryClient(email, password, { school }));
   await buildServer(getClient).connect(new StdioServerTransport());
   console.error("[tapestry-mcp] ready on stdio");
 }
