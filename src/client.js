@@ -18,20 +18,28 @@ const debug = (msg) => { if (process.env.TAPESTRY_DEBUG) console.error(`[tapestr
 export class TapestryError extends Error {}
 export class AuthError extends TapestryError {}
 
-/** Tiny cookie jar: name -> value, good enough for one host. */
+/** Tiny cookie jar: name -> value, good enough for one host. Honours deletions. */
 class Jar {
   constructor() { this.c = new Map(); }
   clear() { this.c.clear(); }
   absorb(res) {
     const list = res.headers.getSetCookie?.() ?? [];
     for (const line of list) {
-      const [pair] = line.split(";");
+      const [pair, ...attrs] = line.split(";");
       const i = pair.indexOf("=");
-      if (i > 0) this.c.set(pair.slice(0, i).trim(), pair.slice(i + 1).trim());
+      if (i <= 0) continue;
+      const name = pair.slice(0, i).trim(), value = pair.slice(i + 1).trim();
+      const attr = (k) => attrs.map((a) => a.trim()).find((a) => a.toLowerCase().startsWith(`${k}=`))?.slice(k.length + 1);
+      const maxAge = attr("max-age"), expires = attr("expires");
+      const gone = !value || (maxAge !== undefined && Number(maxAge) <= 0) ||
+        (expires !== undefined && Date.parse(expires) <= Date.now());
+      if (gone) this.c.delete(name); else this.c.set(name, value);
     }
   }
   header() { return [...this.c].map(([k, v]) => `${k}=${v}`).join("; "); }
 }
+
+const titleOf = (html) => cheerio.load(html)("title").first().text().trim().slice(0, 80);
 
 export function extractCsrf(html) {
   const $ = cheerio.load(html);
@@ -65,8 +73,9 @@ export class TapestryClient {
 
   async _fetch(url, opts = {}) {
     const headers = { "User-Agent": UA, ...(opts.headers || {}) };
+    // Session cookies only ever go to Tapestry itself, even mid-redirect.
     const cookie = this.jar.header();
-    if (cookie) headers.Cookie = cookie;
+    if (cookie && new URL(url).host === new URL(this.baseUrl).host) headers.Cookie = cookie;
     let res;
     try {
       res = await fetch(url, {
@@ -151,10 +160,12 @@ export class TapestryClient {
         : "still on the login page after submitting (wrong email/password, or SSO-only account)";
       throw new AuthError(`Tapestry login failed: ${why}. Tried email: "${this.email}".`);
     }
+    this.landedAt = new URL(finalUrl).pathname;
     this.schoolSlug = finalUrl.match(/\/s\/([^/]+)\//)?.[1] || "";
     this.csrf = extractCsrf(body) || csrf;
     this.loggedIn = true;
-    console.error(`[tapestry-mcp] logged in (school: ${this.schoolSlug || "?"})`);
+    console.error(`[tapestry-mcp] logged in (school: ${this.schoolSlug || "?"}, landed on ${this.landedAt})`);
+    debug(`cookies held: [${[...this.jar.c.keys()].join(", ")}]; API CSRF token ${this.csrf === csrf ? "same as login page's" : "from post-login page"}`);
   }
 
   async api(path, params = {}, retry = true) {
@@ -168,17 +179,27 @@ export class TapestryClient {
       },
     });
     const ct = res.headers.get("content-type") || "";
-    const expired = [401, 419].includes(res.status) ||
-      (res.status >= 300 && res.status < 400 && (res.headers.get("location") || "").includes("login")) ||
-      (res.status === 200 && !ct.includes("json"));
-    if (expired) {
-      if (!retry) throw new AuthError("Tapestry session rejected after re-login.");
+    const loc = res.headers.get("location") || "";
+    let why = "";
+    if ([401, 419].includes(res.status)) why = `HTTP ${res.status}`;
+    else if (res.status >= 300 && res.status < 400 && loc.includes("login")) why = `HTTP ${res.status} redirect to ${loc}`;
+    else if (res.ok) {
+      const body = await res.text();
+      // Trust the body over the content-type header: valid JSON is a good answer.
+      try { return JSON.parse(body); } catch { /* not JSON */ }
+      why = `HTTP ${res.status} ${ct || "no content-type"}, page "${titleOf(body) || "untitled"}" instead of JSON`;
+    }
+    debug(`API ${path} -> HTTP ${res.status} ${ct}${loc ? ` -> ${loc}` : ""}`);
+    if (why) {
+      if (!retry) throw new AuthError(
+        `Tapestry rejected the API request even after logging in again (${why}). ` +
+        `Login ended at ${this.landedAt || "?"}${this.schoolSlug ? "" : " with no school in the URL"}. ` +
+        "Set TAPESTRY_DEBUG=1 for the full login trace.");
       this.loggedIn = false;
       return this.api(path, params, false);
     }
     if (res.status === 404) throw new TapestryError(`Not found: ${path}`);
-    if (!res.ok) throw new TapestryError(`Tapestry API ${path} returned HTTP ${res.status}`);
-    return res.json();
+    throw new TapestryError(`Tapestry API ${path} returned HTTP ${res.status}${loc ? ` (redirect to ${loc})` : ""}`);
   }
 
   async children() {
