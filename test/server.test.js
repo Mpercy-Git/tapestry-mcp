@@ -165,3 +165,52 @@ test("API: JSON with the wrong content-type is accepted; deleted cookies aren't 
     await assert.rejects(client.children(), /page "Log in" instead of JSON.*ended at \/s\/oak\/observations/);
   } finally { srv.close(); }
 });
+
+test("multi-school accounts: /select-school is resolved via links, forms, or TAPESTRY_SCHOOL", async () => {
+  let page = "links";
+  const srv = http.createServer((req, res) => {
+    const u = new URL(req.url, "http://x"); const cookie = req.headers.cookie || "";
+    if (u.pathname === "/login" && req.method === "GET")
+      return res.end('<form><input type="hidden" name="_token" value="t1"><input type="email" name="email"><input type="password" name="password"></form>');
+    if (u.pathname === "/login" && req.method === "POST") {
+      res.writeHead(302, { Location: "/select-school", "Set-Cookie": "sess=1; Path=/" }); return res.end();
+    }
+    if (u.pathname === "/select-school" && req.method === "GET") {
+      if (page === "links")
+        return res.end('<a href="/logout">Log out</a><a href="/s/oak/observations">Oak Nursery</a> <a href="/s/elm/observations">Elm Primary</a>');
+      return res.end('<form method="post" action="/select-school"><input type="hidden" name="_token" value="t2">' +
+        '<button name="school_id" value="11">Oak Nursery</button><button name="school_id" value="22">Elm Primary</button></form>');
+    }
+    if (u.pathname === "/select-school" && req.method === "POST") {
+      let body = ""; req.on("data", (d) => (body += d)); return req.on("end", () => {
+        const slug = { 11: "oak", 22: "elm" }[new URLSearchParams(body).get("school_id")];
+        res.writeHead(302, { Location: `/s/${slug}/observations`, "Set-Cookie": `school=${slug}; Path=/` }); res.end();
+      });
+    }
+    const m = u.pathname.match(/^\/s\/(\w+)\//);
+    if (m) {
+      res.setHeader("Set-Cookie", `school=${m[1]}; Path=/`);
+      return res.end('<div class="hidden">{"csrfToken":"api-tok"}</div>');
+    }
+    if (!cookie.includes("school=")) { res.writeHead(401); return res.end(); }
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify([{ id: 1, fullName: cookie.match(/school=(\w+)/)[1] }]));
+  });
+  await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+  const base = `http://127.0.0.1:${srv.address().port}`;
+  try {
+    const first = new TapestryClient("me@x", "pw", { baseUrl: base });
+    assert.equal((await first.children())[0].fullName, "oak");
+    assert.equal(first.schoolSlug, "oak");
+
+    const chosen = new TapestryClient("me@x", "pw", { baseUrl: base, school: "elm" });
+    assert.equal((await chosen.children())[0].fullName, "elm");
+
+    page = "form";
+    const byName = new TapestryClient("me@x", "pw", { baseUrl: base, school: "Elm Prim" });
+    assert.equal((await byName.children())[0].fullName, "elm");
+
+    await assert.rejects(new TapestryClient("me@x", "pw", { baseUrl: base, school: "Birch" }).login(),
+      /TAPESTRY_SCHOOL "Birch" doesn't match.*"Oak Nursery", "Elm Primary"/);
+  } finally { srv.close(); }
+});

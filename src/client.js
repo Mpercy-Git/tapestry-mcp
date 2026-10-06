@@ -56,13 +56,61 @@ export function extractCsrf(html) {
   return $('meta[name="csrf-token"]').attr("content") || $('input[name="_token"]').attr("value") || "";
 }
 
+/**
+ * Schools offered on Tapestry's /select-school page (accounts linked to more than one school).
+ * Handles plain links into /s/<slug>/, a <select> of schools, or one form/button per school.
+ */
+export function schoolChoices(html, pageUrl) {
+  const $ = cheerio.load(html);
+  const out = [];
+  const clean = (t) => String(t || "").replace(/\s+/g, " ").trim();
+  const seen = new Set();
+  $("a[href]").each((_, el) => {
+    let url;
+    try { url = new URL($(el).attr("href"), pageUrl); } catch { return; }
+    const slug = url.pathname.match(/^\/s\/([^/]+)/)?.[1];
+    const isChoice = slug || /select-school\/[^/]+/.test(url.pathname) || /[?&]school(_?id)?=/i.test(url.search);
+    const key = slug || url.href;
+    if (!isChoice || seen.has(key) || url.host !== new URL(pageUrl).host) return;
+    seen.add(key);
+    out.push({ name: clean($(el).text()) || slug || url.pathname, slug, url: url.href, method: "GET" });
+  });
+  if (out.length) return out;
+  $("form").each((_, f) => {
+    const $f = $(f);
+    const url = new URL($f.attr("action") || pageUrl, pageUrl).href;
+    if (/logout|sign-?out/i.test(url)) return;
+    const method = ($f.attr("method") || "GET").toUpperCase();
+    const base = {};
+    $f.find("input[name]").each((_, i) => {
+      const type = ($(i).attr("type") || "").toLowerCase();
+      if (!["submit", "button", "image"].includes(type)) base[$(i).attr("name")] = $(i).attr("value") || "";
+    });
+    const $select = $f.find("select[name]").first();
+    const $buttons = $f.find("button[name][value], input[type=submit][name][value]");
+    if ($select.length) {
+      $select.find("option").each((_, o) => {
+        const v = $(o).attr("value");
+        if (v) out.push({ name: clean($(o).text()) || v, url, method, fields: { ...base, [$select.attr("name")]: v } });
+      });
+    } else if ($buttons.length) {
+      $buttons.each((_, b) => out.push({
+        name: clean($(b).text()) || $(b).attr("value"), url, method, fields: { ...base, [$(b).attr("name")]: $(b).attr("value") },
+      }));
+    } else if (Object.keys(base).length) {
+      out.push({ name: clean($f.text()).slice(0, 80) || url, url, method, fields: base });
+    }
+  });
+  return out;
+}
+
 export class TapestryClient {
-  constructor(email, password, { baseUrl = BASE_URL, timeoutMs = 30000 } = {}) {
+  constructor(email, password, { baseUrl = BASE_URL, timeoutMs = 30000, school = "" } = {}) {
     if (!email || !password) {
       const missing = [!email && "TAPESTRY_EMAIL", !password && "TAPESTRY_PASSWORD"].filter(Boolean).join(" and ");
       throw new AuthError(`${missing} not set in the MCP server's environment.`);
     }
-    Object.assign(this, { email, password, baseUrl, timeoutMs });
+    Object.assign(this, { email, password, baseUrl, timeoutMs, school });
     this._loginUrl = `${baseUrl.replace(/\/$/, "")}/login`;
     this.jar = new Jar();
     this.csrf = "";
@@ -145,8 +193,8 @@ export class TapestryClient {
     if (post.status === 429) throw new AuthError("Tapestry login failed: HTTP 429 (too many attempts — wait a while before retrying).");
     if (post.status >= 400) throw new AuthError(`Tapestry login failed: HTTP ${post.status} from ${postUrl}.`);
     const final = loc ? await this._get(new URL(loc, postUrl).href) : post;
-    const finalUrl = final.finalUrl || postUrl;
-    const body = await final.text();
+    let finalUrl = final.finalUrl || postUrl;
+    let body = await final.text();
     debug(`ended at ${finalUrl} (HTTP ${final.status})`);
 
     if (/two.factor|verification code|authenticator/i.test(body))
@@ -160,12 +208,55 @@ export class TapestryClient {
         : "still on the login page after submitting (wrong email/password, or SSO-only account)";
       throw new AuthError(`Tapestry login failed: ${why}. Tried email: "${this.email}".`);
     }
+    let landed = { url: finalUrl, body };
+    if (/select-school/i.test(new URL(finalUrl).pathname)) landed = await this._selectSchool(finalUrl, body, csrf);
+    [finalUrl, body] = [landed.url, landed.body];
     this.landedAt = new URL(finalUrl).pathname;
     this.schoolSlug = finalUrl.match(/\/s\/([^/]+)\//)?.[1] || "";
     this.csrf = extractCsrf(body) || csrf;
     this.loggedIn = true;
     console.error(`[tapestry-mcp] logged in (school: ${this.schoolSlug || "?"}, landed on ${this.landedAt})`);
     debug(`cookies held: [${[...this.jar.c.keys()].join(", ")}]; API CSRF token ${this.csrf === csrf ? "same as login page's" : "from post-login page"}`);
+  }
+
+  /** Pick a school on /select-school: TAPESTRY_SCHOOL (slug or part of the name) if set, else the first. */
+  async _selectSchool(pageUrl, html, csrf) {
+    const choices = schoolChoices(html, pageUrl);
+    debug(`select-school offers: ${choices.map((c) => `"${c.name}"`).join(", ") || "nothing recognisable"}`);
+    if (!choices.length) {
+      const $ = cheerio.load(html);
+      debug(`select-school links: ${$("a[href]").map((_, a) => $(a).attr("href")).get().join(" ")}`);
+      throw new AuthError("Tapestry asked to choose a school (/select-school), but no schools could be read from that page. " +
+        "Set TAPESTRY_DEBUG=1 and share the trace so the page can be supported.");
+    }
+    const want = this.school.trim().toLowerCase();
+    const pick = want
+      ? choices.find((c) => c.slug?.toLowerCase() === want || c.name.toLowerCase().includes(want))
+      : choices[0];
+    if (!pick) throw new AuthError(`TAPESTRY_SCHOOL "${this.school}" doesn't match any school on this account: ` +
+      `${choices.map((c) => `"${c.name}"`).join(", ")}.`);
+    if (!want && choices.length > 1) console.error(`[tapestry-mcp] account has ${choices.length} schools ` +
+      `(${choices.map((c) => c.name).join(", ")}); using "${pick.name}". Set TAPESTRY_SCHOOL to choose.`);
+
+    let res;
+    if (pick.method === "POST") {
+      const form = new URLSearchParams(pick.fields);
+      if (!form.has("_token")) form.set("_token", extractCsrf(html) || csrf);
+      res = await this._fetch(pick.url, {
+        method: "POST", body: form, headers: { "Content-Type": "application/x-www-form-urlencoded", Referer: pageUrl },
+      });
+      const loc = res.headers.get("location");
+      if (loc) res = await this._get(new URL(loc, pick.url).href);
+    } else {
+      const url = new URL(pick.url);
+      for (const [k, v] of Object.entries(pick.fields || {})) url.searchParams.set(k, v);
+      res = await this._get(url.href);
+    }
+    const url = res.finalUrl || pick.url;
+    debug(`chose "${pick.name}" -> HTTP ${res.status} at ${url}`);
+    if (!res.ok || /select-school/i.test(new URL(url).pathname))
+      throw new AuthError(`Choosing school "${pick.name}" didn't work (HTTP ${res.status}, at ${new URL(url).pathname}).`);
+    return { url, body: await res.text() };
   }
 
   async api(path, params = {}, retry = true) {
