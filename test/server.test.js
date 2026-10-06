@@ -134,3 +134,33 @@ test("login uses the form with the password box and posts to its action; HTTP er
 test("missing credentials name the unset variable", () => {
   assert.throws(() => new TapestryClient("me@x", ""), /TAPESTRY_PASSWORD not set/);
 });
+
+test("API: JSON with the wrong content-type is accepted; deleted cookies aren't resent; rejection says why", async () => {
+  let reject = false, sawDeleted = false;
+  const srv = http.createServer((req, res) => {
+    const u = new URL(req.url, "http://x"); const cookie = req.headers.cookie || "";
+    if (cookie.includes("old=")) sawDeleted = true;
+    if (u.pathname === "/login" && req.method === "GET") {
+      res.setHeader("Set-Cookie", "old=1; Path=/");
+      return res.end('<form><input type="hidden" name="_token" value="t1"><input type="email" name="email"><input type="password" name="password"></form>');
+    }
+    if (u.pathname === "/login" && req.method === "POST") {
+      res.writeHead(302, { Location: "/s/oak/observations",
+        "Set-Cookie": ["old=; Path=/; Max-Age=0", "sess=1; Path=/"] });
+      return res.end();
+    }
+    if (u.pathname.startsWith("/s/")) return res.end('<div class="hidden">{"csrfToken":"api-tok"}</div>');
+    if (reject) { res.setHeader("Content-Type", "text/html"); return res.end("<title>Log in</title>"); }
+    res.setHeader("Content-Type", "text/html");
+    res.end(JSON.stringify([{ id: 1, fullName: "Sam" }]));
+  });
+  await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+  const base = `http://127.0.0.1:${srv.address().port}`;
+  try {
+    const client = new TapestryClient("me@x", "pw", { baseUrl: base });
+    assert.equal((await client.children())[0].fullName, "Sam");
+    assert.equal(sawDeleted, false);
+    reject = true;
+    await assert.rejects(client.children(), /page "Log in" instead of JSON.*ended at \/s\/oak\/observations/);
+  } finally { srv.close(); }
+});
