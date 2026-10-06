@@ -2,12 +2,12 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-09-29/server.schema.json",
   "name": "io.github.mpercy-git/tapestry-mcp",
   "description": "Unofficial read-only access to a parent's Tapestry learning journal (tapestryjournal.com)",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "github:Mpercy-Git/tapestry-mcp",
-      "version": "0.2.3",
+      "version": "0.2.4",
       "transport": { "type": "stdio" },
       "environmentVariables": [
         { "name": "TAPESTRY_EMAIL", "description": "Tapestry parent login email", "isRequired": true },

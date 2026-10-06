@@ -1,6 +1,6 @@
 {
   "name": "tapestry-mcp",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Unofficial read-only MCP server for the Tapestry learning journal (tapestryjournal.com)",
   "type": "module",
   "bin": {
