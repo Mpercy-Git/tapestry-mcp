@@ -139,7 +139,8 @@ test("API: JSON with the wrong content-type is accepted; deleted cookies aren't 
   let reject = false, sawDeleted = false;
   const srv = http.createServer((req, res) => {
     const u = new URL(req.url, "http://x"); const cookie = req.headers.cookie || "";
-    if (cookie.includes("old=")) sawDeleted = true;
+    // The login POST legitimately carries "old"; only requests after it deletes the cookie count.
+    if (u.pathname !== "/login" && cookie.includes("old=")) sawDeleted = true;
     if (u.pathname === "/login" && req.method === "GET") {
       res.setHeader("Set-Cookie", "old=1; Path=/");
       return res.end('<form><input type="hidden" name="_token" value="t1"><input type="email" name="email"><input type="password" name="password"></form>');
